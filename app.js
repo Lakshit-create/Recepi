@@ -215,53 +215,96 @@ const RecipeApp = (() => {
     const recipeContainer = document.querySelector('#recipe-container');
     const filterButtons = document.querySelectorAll('.filters button');
     const sortButtons = document.querySelectorAll('.sorters button');
+    const searchInput = document.querySelector('#search-input');
+    const recipeCountDisplay = document.querySelector('#recipe-count');
     
     // State - Private to this module
     let currentFilter = 'all';
     let currentSort = null;
+    let currentSearch = '';
+    let debounceTimer = null;
+    let favoriteRecipes = [];
+    
+    // ========== LOCALSTORAGE & FAVORITES MANAGEMENT ==========
+    
+    // Load favorites from browser's local storage
+    const loadFavorites = () => {
+        const saved = localStorage.getItem('favoriteRecipes');
+        favoriteRecipes = saved ? JSON.parse(saved) : [];
+    };
+    
+    // Save current favorites to browser's local storage
+    const saveFavorites = () => {
+        localStorage.setItem('favoriteRecipes', JSON.stringify(favoriteRecipes));
+    };
+    
+    // Check if a specific recipe is in the favorites list
+    const isFavorited = (recipeId) => {
+        return favoriteRecipes.includes(recipeId);
+    };
+    
+    // Toggle favorite status for a recipe (add or remove)
+    const toggleFavorite = (recipeId) => {
+        const index = favoriteRecipes.indexOf(recipeId);
+        if (index > -1) {
+            favoriteRecipes.splice(index, 1);
+        } else {
+            favoriteRecipes.push(recipeId);
+        }
+        saveFavorites();
+    };
     
     // ========== PRIVATE FUNCTIONS ==========
     
-    // Recursive function to render steps with any level of nesting
+    // Recursively render recipe steps with support for nested substeps
     const renderStepsRecursively = (steps, depth = 1) => {
-    return steps
-        .map((step, index) => {
-            // Base case: step is a string
-            if (typeof step === 'string') {
-                return `<li><strong>Step ${index + 1}:</strong> ${step}</li>`;
-            }
-            
-            // Recursive case: step is an object with substeps
-            if (typeof step === 'object' && step.substeps && Array.isArray(step.substeps)) {
-                const substepsHTML = renderStepsRecursively(step.substeps, depth + 1);
-                const listClass = depth > 1 ? `nested-list-${depth}` : '';
+        return steps
+            .map((step, index) => {
+                // Base case: step is a string
+                if (typeof step === 'string') {
+                    return `<li><strong>Step ${index + 1}:</strong> ${step}</li>`;
+                }
                 
-                return `
-                    <li>
-                        <strong>Step ${index + 1}: ${step.step}</strong>
-                        <${depth === 1 ? 'ol' : 'ul'} class="nested-steps ${listClass}">
-                            ${substepsHTML}
-                        </${depth === 1 ? 'ol' : 'ul'}>
-                    </li>
-                `;
-            }
-            
-            return '';
-        })
-        .join('');
+                // Recursive case: step is an object with substeps
+                if (typeof step === 'object' && step.substeps && Array.isArray(step.substeps)) {
+                    const substepsHTML = renderStepsRecursively(step.substeps, depth + 1);
+                    const listClass = depth > 1 ? `nested-list-${depth}` : '';
+                    const listTag = depth === 1 ? 'ol' : 'ul';
+                    
+                    return `
+                        <li>
+                            <strong>Step ${index + 1}: ${step.step}</strong>
+                            <${listTag} class="nested-steps ${listClass}">
+                                ${substepsHTML}
+                            </${listTag}>
+                        </li>
+                    `;
+                }
+                
+                return '';
+            })
+            .join('');
     };
     
-    // Function to create HTML for a single recipe card (pure)
+    // Create HTML for a single recipe card (pure function)
     const createRecipeCard = (recipe) => {
         const ingredientsList = recipe.ingredients
-            .map(ing => `<li>${ing}</li>`)
+            .map(ingredient => `<li>${ingredient}</li>`)
             .join('');
         
         const stepsHTML = renderStepsRecursively(recipe.steps);
+        const isRecipeFavorited = isFavorited(recipe.id);
+        const heartClass = isRecipeFavorited ? 'heart-icon favorited' : 'heart-icon';
+        const heartSymbol = isRecipeFavorited ? '❤️' : '🤍';
         
         return `
             <div class="recipe-card" data-id="${recipe.id}">
-                <h3>${recipe.title}</h3>
+                <div class="card-header">
+                    <h3>${recipe.title}</h3>
+                    <button class="${heartClass}" data-recipe-id="${recipe.id}" title="Add to favorites">
+                        ${heartSymbol}
+                    </button>
+                </div>
                 <div class="recipe-meta">
                     <span>⏱️ ${recipe.time} min</span>
                     <span class="difficulty ${recipe.difficulty}">${recipe.difficulty}</span>
@@ -290,58 +333,103 @@ const RecipeApp = (() => {
         `;
     };
     
-    // Function to render recipes to the DOM (side-effect isolated here)
+    // ========== RENDERING & DOM UPDATES ==========
+    
+    // Render filtered/sorted recipes to DOM and update counter
     const renderRecipes = (recipesToRender) => {
         const recipeCardsHTML = recipesToRender
             .map(createRecipeCard)
             .join('');
         
         recipeContainer.innerHTML = recipeCardsHTML;
+        
+        // Update recipe counter display
+        const totalRecipes = recipes.length;
+        const shownRecipes = recipesToRender.length;
+        recipeCountDisplay.textContent = `Showing ${shownRecipes} of ${totalRecipes} recipes`;
     };
     
-    // Event delegation handler for toggle buttons
-    const handleToggleClick = (e) => {
-        // Only handle clicks on toggle buttons
-        if (!e.target.classList.contains('btn-toggle')) {
+    // Handle ingredient/steps toggle and favorite button clicks via event delegation
+    const handleRecipeCardEvent = (event) => {
+        // Handle favorite button clicks
+        if (event.target.classList.contains('heart-icon')) {
+            const recipeId = parseInt(event.target.getAttribute('data-recipe-id'), 10);
+            toggleFavorite(recipeId);
+            
+            const isNowFavorited = isFavorited(recipeId);
+            event.target.textContent = isNowFavorited ? '❤️' : '🤍';
+            event.target.classList.toggle('favorited');
             return;
         }
         
-        // Get the section type (ingredients or steps)
-        const sectionType = e.target.getAttribute('data-type');
+        // Handle ingredient/steps toggle button clicks
+        if (!event.target.classList.contains('btn-toggle')) {
+            return;
+        }
         
-        // Get the closest recipe card
-        const card = e.target.closest('.recipe-card');
-        if (!card) return;
+        const sectionType = event.target.getAttribute('data-type');
+        const recipeCard = event.target.closest('.recipe-card');
         
-        // Find the corresponding section
-        const section = card.querySelector(`.${sectionType}-section`);
+        if (!recipeCard) return;
+        
+        const section = recipeCard.querySelector(`.${sectionType}-section`);
         if (!section) return;
         
-        // Toggle the hidden class
         section.classList.toggle('hidden');
         
-        // Update button text to reflect current state
+        // Update button text to reflect new state
         const isHidden = section.classList.contains('hidden');
         const sectionName = sectionType.charAt(0).toUpperCase() + sectionType.slice(1);
-        const displayText = isHidden ? `Show ${sectionName}` : `Hide ${sectionName}`;
-        e.target.textContent = displayText;
+        const newButtonText = isHidden ? `Show ${sectionName}` : `Hide ${sectionName}`;
+        event.target.textContent = newButtonText;
+    };
+    
+    // ========== FILTERING & SEARCHING ==========
+    
+    // Filter recipes by title or ingredient match (case-insensitive)
+    const applySearch = (recipesList, searchTerm) => {
+        if (!searchTerm.trim()) {
+            return recipesList;
+        }
+    
+        const lowerSearchTerm = searchTerm.toLowerCase();
+        return recipesList.filter((recipe) => {
+            const titleMatch = recipe.title.toLowerCase().includes(lowerSearchTerm);
+            const ingredientMatch = recipe.ingredients.some(ingredient =>
+                ingredient.toLowerCase().includes(lowerSearchTerm)
+            );
+            return titleMatch || ingredientMatch;
+        });
+    };
+    
+    // Filter recipes by category: difficulty level, favorites, or quick recipes
+    const applyFilter = (recipesList, filterMode) => {
+        if (filterMode === 'all') {
+            return recipesList;
+        }
+    
+        if (filterMode === 'favorites') {
+            return recipesList.filter((recipe) => isFavorited(recipe.id));
+        }
+    
+        if (filterMode === 'quick') {
             return recipesList.filter((recipe) => recipe.time < 30);
         }
     
-        // difficulty filters: easy, medium, hard
+        // Difficulty filters: easy, medium, hard
         return recipesList.filter((recipe) => recipe.difficulty === filterMode);
     };
     
-    // Pure function: sort recipes based on mode (works on a shallow copy)
+    // ========== SORTING ==========
+    
+    // Sort recipes by name (alphabetical) or cooking time (fastest first)
     const applySort = (recipesList, sortMode) => {
         if (!sortMode) return recipesList;
     
         const copy = [...recipesList];
     
         if (sortMode === 'name') {
-            return copy.sort((a, b) =>
-                a.title.localeCompare(b.title)
-            );
+            return copy.sort((a, b) => a.title.localeCompare(b.title));
         }
     
         if (sortMode === 'time') {
@@ -351,62 +439,79 @@ const RecipeApp = (() => {
         return copy;
     };
     
-    // Central function: combines filter + sort then renders
+    // Combine search, filter, and sort pipeline then render
     const updateDisplay = () => {
-        const filtered = applyFilter(recipes, currentFilter);
-        const sorted = applySort(filtered, currentSort);
-        renderRecipes(sorted);
+        const searchResults = applySearch(recipes, currentSearch);
+        const filteredResults = applyFilter(searchResults, currentFilter);
+        const sortedResults = applySort(filteredResults, currentSort);
+        renderRecipes(sortedResults);
     };
     
-    // Helper: update active button styles
-    const setActiveButton = (buttons, activeAttr, value) => {
-        buttons.forEach((btn) => {
-            if (btn.getAttribute(activeAttr) === value) {
-                btn.classList.add('active');
-            } else {
-                btn.classList.remove('active');
-            }
+    // ========== EVENT LISTENER SETUP ==========
+    
+    // Update active button state based on current selection
+    const setActiveButtonState = (buttons, dataAttribute, activeValue) => {
+        buttons.forEach((button) => {
+            const isActive = button.getAttribute(dataAttribute) === activeValue;
+            button.classList.toggle('active', isActive);
         });
     };
     
-    // Setup event listeners for filters
+    // Setup filter button click handlers
     const setupFilterListeners = () => {
         filterButtons.forEach((button) => {
             button.addEventListener('click', () => {
-                const selectedFilter = button.getAttribute('data-filter');
-                currentFilter = selectedFilter;
-                setActiveButton(filterButtons, 'data-filter', selectedFilter);
+                currentFilter = button.getAttribute('data-filter');
+                setActiveButtonState(filterButtons, 'data-filter', currentFilter);
                 updateDisplay();
             });
         });
     };
     
-    // Setup event listeners for sorters
+    // Setup sort button click handlers
     const setupSortListeners = () => {
         sortButtons.forEach((button) => {
             button.addEventListener('click', () => {
                 const selectedSort = button.getAttribute('data-sort');
-                // toggle sort off if same button clicked again
+                // Toggle sort off if the same button is clicked again
                 currentSort = currentSort === selectedSort ? null : selectedSort;
-                setActiveButton(sortButtons, 'data-sort', currentSort);
+                setActiveButtonState(sortButtons, 'data-sort', currentSort);
                 updateDisplay();
             });
         });
     };
     
-    // Setup event delegation for toggle buttons (show/hide ingredients and steps)
-    const setupToggleListeners = () => {
-        recipeContainer.addEventListener('click', handleToggleClick);
+    // Setup event delegation for recipe card interactions (favorites, expandable sections)
+    const setupRecipeCardListeners = () => {
+        recipeContainer.addEventListener('click', handleRecipeCardEvent);
+    };
+    
+    // Setup search input with debouncing to avoid excessive filtering
+    const setupSearchListeners = () => {
+        searchInput.addEventListener('input', (event) => {
+            // Clear previous debounce timer
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
+            }
+            
+            // Execute search after user stops typing for 300ms
+            debounceTimer = setTimeout(() => {
+                currentSearch = event.target.value;
+                updateDisplay();
+            }, 300);
+        });
     };
     
     // ========== PUBLIC API ==========
     
     return {
-        // Initialize the app
+        // Initialize the app: load data, setup listeners, render initial state
         init: () => {
+            loadFavorites();
             setupFilterListeners();
             setupSortListeners();
-            setupToggleListeners();
+            setupRecipeCardListeners();
+            setupSearchListeners();
             updateDisplay();
         }
     };
